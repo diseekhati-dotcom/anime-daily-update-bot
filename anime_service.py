@@ -223,15 +223,23 @@ def collect_releases(today=None):
                     # Don't treat explicit ended/removed entries as active.
                     if re.search(r"\b(ended|removed)\b", " ".join(raw.values()).lower()):
                         continue
-                    ep = infer_episode(premiere, schedule, today, anime, " ".join(raw.values()))
+                    ep = infer_episode(premiere, schedule, today, anime, " ".join(raw.values()) + " " + article_title)
                     time = extract_time(schedule)
+                    row_text = " ".join(raw.values())
                     platform = ""
+                    lower_row = row_text.lower()
                     lower_page = page_text.lower()
                     for name in ("Crunchyroll", "Netflix", "Muse India (YouTube)", "Muse India",
                                  "Ani-One India", "JioHotstar", "Sony LIV", "Sony YAY!", "Amazon Prime Video"):
-                        if name.lower() in lower_page:
+                        if name.lower() in lower_row:
                             platform = name
                             break
+                    if not platform:
+                        for name in ("Crunchyroll", "Netflix", "Muse India (YouTube)", "Muse India",
+                                     "Ani-One India", "JioHotstar", "Sony LIV", "Sony YAY!", "Amazon Prime Video"):
+                            if name.lower() in lower_page:
+                                platform = name
+                                break
                     if not platform:
                         platform = "Platform"
                     expected = "tba" in premiere.lower() or "expected" in schedule.lower() or "expected" in anime.lower()
@@ -292,7 +300,7 @@ def build_message(today=None):
     today = today or date.today()
     releases = collect_releases(today)
     day = bold_sans(today.strftime("%A").upper())
-    human_date = bold_sans(today.strftime("%-d %B"))
+    human_date = bold_sans(f"{today.day} {today.strftime("%B")}")
     header = (
         "💫 [DC  Empire] –FAIRY WORLD⚡\n"
         "⟣━━━━━━━━━━━━━━━━━⟢\n"
@@ -302,6 +310,7 @@ def build_message(today=None):
     )
     body = "\n".join(format_release(r) for r in releases)
     footer = (
+        "🔎 Source: DC\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "🔔 𝗗𝗮𝗶𝗹𝘆 𝗔𝗻𝗶𝗺𝗲 𝗨𝗽𝗱𝗮𝘁𝗲𝘀 | 𝗡𝗲𝘄 𝗘𝗽𝗶𝘀𝗼𝗱𝗲𝘀 | 𝗔𝗻𝗶𝗺𝗲 𝗡𝗲𝘄𝘀\n"
         "💠 𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗕𝘆 : @dc_hmm\n"
