@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -12,6 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from anime_service import build_message
 
 load_dotenv()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -19,48 +20,117 @@ logging.basicConfig(
 log = logging.getLogger("anime_daily_update_bot")
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
 TZ_NAME = os.getenv("TZ", "Asia/Kolkata").strip()
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is missing.")
-if not CHAT_ID:
-    raise RuntimeError("CHAT_ID environment variable is missing.")
-
-try:
-    TARGET_CHAT = int(CHAT_ID)
-except ValueError:
-    TARGET_CHAT = CHAT_ID
 
 TZ = ZoneInfo(TZ_NAME)
 
+# In-memory chat registry. A persistent external store can be added later.
+# Chats are automatically registered when they use /start or /activate.
+subscribers = set()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ Anime Daily Update Bot active.\n"
-        "Daily schedule: 5:00 PM IST\n"
-        "Source: DC"
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    subscribers.add(chat.id)
+
+    if chat.type == "private":
+        text = (
+            "✅ Anime Daily Update Bot Active!\n\n"
+            "Aapka DM daily update list me add ho gaya hai. "
+            "Har din 5:00 PM IST par update milega.\n\n"
+            "🔎 Source: DC"
+        )
+    else:
+        text = (
+            "✅ Ye group daily anime update list me add ho gaya hai.\n"
+            "Har din 5:00 PM IST par update milega.\n\n"
+            "🔎 Source: DC"
+        )
+
+    await update.effective_message.reply_text(text)
+
+
+async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat:
+        return
+    subscribers.add(chat.id)
+    await update.effective_message.reply_text(
+        "✅ Daily anime updates ON.\n"
+        "⏰ Daily time: 5:00 PM IST\n"
+        "🔎 Source: DC"
     )
 
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat:
+        return
+    subscribers.discard(chat.id)
+    await update.effective_message.reply_text(
+        "🔕 Daily anime updates OFF for this chat."
+    )
+
+
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"CHAT_ID: {update.effective_chat.id}")
+    await update.effective_message.reply_text(
+        f"Chat ID: {update.effective_chat.id}"
+    )
+
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_chat.id) != str(TARGET_CHAT):
-        await update.message.reply_text("❌ Test command is only enabled in the configured chat.")
+    chat = update.effective_chat
+    if not chat:
         return
-    msg = build_message()
-    await context.bot.send_message(chat_id=TARGET_CHAT, text=msg)
+    subscribers.add(chat.id)
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=build_message(datetime.now(TZ).date()),
+        )
+    except Exception:
+        log.exception("Test send failed")
 
-async def send_daily():
-    from telegram import Bot
-    msg = build_message()
-    async with Bot(TOKEN) as bot:
-        await bot.send_message(chat_id=TARGET_CHAT, text=msg)
-    log.info("Daily anime update sent.")
+
+async def send_daily(bot):
+    if not subscribers:
+        log.info("No subscribed chats; daily post skipped.")
+        return
+
+    msg = build_message(datetime.now(TZ).date())
+ 
+    dead = []
+    for chat_id in list(subscribers):
+        try:
+            await bot.send_message(chat_id=chat_id, text=msg)
+        except Exception as exc:
+            log.warning("Could not send to %s: %s", chat_id, exc)
+            # Remove chats that can no longer receive messages.
+            if "chat not found" in str(exc).lower() or "forbidden" in str(exc).lower():
+                dead.append(chat_id)
+
+    for chat_id in dead:
+        subscribers.discard(chat_id)
+
+    log.info("Daily anime update sent to %d chat(s).", len(subscribers))
+
+
+async def health(request):
+    return "OK"
+
 
 async def main():
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("activate", activate))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("test", test))
 
@@ -74,6 +144,7 @@ async def main():
         replace_existing=True,
         coalesce=True,
         misfire_grace_time=3600,
+        args=[app.bot],
     )
     scheduler.start()
 
@@ -82,6 +153,7 @@ async def main():
     await app.updater.start_polling(drop_pending_updates=True)
 
     log.info("Bot running. Daily post scheduled for 17:00 %s.", TZ_NAME)
+
     try:
         await asyncio.Event().wait()
     finally:
@@ -89,6 +161,7 @@ async def main():
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
