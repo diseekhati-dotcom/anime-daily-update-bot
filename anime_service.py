@@ -45,10 +45,67 @@ class Release:
 def clean(s):
     return re.sub(r"\s+", " ", html.unescape(s or "")).strip()
 
-def get(url, timeout=20):
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
-    r.raise_for_status()
-    return r.text
+def get(url, timeout=30):
+    """
+    Anime Mirchi fetcher.
+    Render/cloud IP par Anime Mirchi 403 de sakta hai,
+    isliye direct request fail hone par Jina Reader fallback use hota hai.
+    """
+
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+
+        if response.text.strip():
+            return response.text
+
+    except requests.RequestException as exc:
+        log.warning(
+            "Direct Anime Mirchi fetch failed: %s | %s",
+            url,
+            exc
+        )
+
+    # Render IP ko Anime Mirchi block kare to fallback
+    clean_url = url.replace("https://", "", 1)
+    proxy_url = "https://r.jina.ai/http://" + clean_url
+
+    try:
+        response = requests.get(
+            proxy_url,
+            headers={
+                "User-Agent": HEADERS.get(
+                    "User-Agent",
+                    "Mozilla/5.0"
+                ),
+                "Accept": "text/html,text/plain,*/*",
+            },
+            timeout=45,
+        )
+        response.raise_for_status()
+
+        if response.text.strip():
+            log.info(
+                "Anime Mirchi fetched using fallback: %s",
+                url
+            )
+            return response.text
+
+    except requests.RequestException as exc:
+        log.warning(
+            "Fallback fetch failed: %s | %s",
+            url,
+            exc
+        )
+
+    raise RuntimeError(
+        f"Unable to fetch Anime Mirchi page: {url}"
+    )
 
 def parse_date(s):
     s = clean(s)
@@ -101,33 +158,149 @@ def detect_languages(text):
 
 def discover_article_urls():
     urls = set()
-    for u in DISCOVERY_URLS:
-        try:
-            soup = BeautifulSoup(get(u), "lxml")
-            for a in soup.select("a[href]"):
-                href = urljoin(u, a.get("href"))
-                if urlparse(href).netloc.endswith("animemirchi.com"):
-                    txt = clean(a.get_text(" ", strip=True)).lower()
-                    if any(k in txt for k in KEYWORDS):
-                        urls.add(href.split("#")[0])
-        except Exception as e:
-            log.warning("Discovery failed %s: %s", u, e)
 
-    # WordPress REST API gives a second discovery path when enabled.
-    for endpoint in (
-        "wp-json/wp/v2/posts?per_page=100&orderby=date&order=desc",
-        "wp-json/wp/v2/pages?per_page=100&orderby=date&order=desc",
-    ):
+    # Important Anime Mirchi schedule pages
+    seed_urls = [
+        "https://animemirchi.com/crunchyroll-summer-2026-hindi-tamil-telugu-lineup/",
+        "https://animemirchi.com/netflix-summer-2026-hindi-tamil-telugu-dub-anime/",
+        "https://animemirchi.com/muse-india-hindi-dubbed-anime-list/",
+        "https://animemirchi.com/ani-one-india-hindi-dubbed-anime-list/",
+        "https://animemirchi.com/guide/",
+        "https://animemirchi.com/list/",
+        "https://animemirchi.com/streaming/",
+    ]
+
+    # Seed pages ko hamesha include karo
+    for url in seed_urls:
+        urls.add(url)
+
+    # Normal website discovery
+    for discovery_url in DISCOVERY_URLS:
         try:
-            data = requests.get(urljoin(BASE_URL, endpoint), headers=HEADERS, timeout=20).json()
+            html = get(discovery_url)
+            soup = BeautifulSoup(html, "lxml")
+
+            for anchor in soup.select("a[href]"):
+                href = urljoin(
+                    discovery_url,
+                    anchor.get("href")
+                )
+
+                parsed = urlparse(href)
+
+                if not parsed.netloc.endswith(
+                    "animemirchi.com"
+                ):
+                    continue
+
+                link_text = clean(
+                    anchor.get_text(
+                        " ",
+                        strip=True
+                    )
+                ).lower()
+
+                if any(
+                    keyword in link_text
+                    for keyword in KEYWORDS
+                ):
+                    urls.add(
+                        href.split("#")[0]
+                    )
+
+        except Exception as exc:
+            log.warning(
+                "Discovery failed %s: %s",
+                discovery_url,
+                exc
+            )
+
+    # WordPress API discovery
+    api_urls = [
+        urljoin(
+            BASE_URL,
+            "wp-json/wp/v2/posts?per_page=100&orderby=date&order=desc"
+        ),
+        urljoin(
+            BASE_URL,
+            "wp-json/wp/v2/pages?per_page=100&orderby=date&order=desc"
+        ),
+    ]
+
+    for api_url in api_urls:
+        try:
+            data = None
+
+            # Direct API
+            try:
+                response = requests.get(
+                    api_url,
+                    headers=HEADERS,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            except Exception:
+                # API fallback
+                clean_api = api_url.replace(
+                    "https://",
+                    "",
+                    1
+                )
+
+                proxy_api = (
+                    "https://r.jina.ai/http://"
+                    + clean_api
+                )
+
+                response = requests.get(
+                    proxy_api,
+                    headers=HEADERS,
+                    timeout=45,
+                )
+                response.raise_for_status()
+
+                try:
+                    data = response.json()
+                except ValueError:
+                    data = None
+
+            if not isinstance(data, list):
+                continue
+
             for item in data:
-                title = clean(item.get("title", {}).get("rendered", ""))
+                title = clean(
+                    item.get(
+                        "title",
+                        {}
+                    ).get(
+                        "rendered",
+                        ""
+                    )
+                )
+
                 link = item.get("link")
-                if link and any(k in title.lower() for k in KEYWORDS):
+
+                if not link:
+                    continue
+
+                title_lower = title.lower()
+
+                if any(
+                    keyword in title_lower
+                    for keyword in KEYWORDS
+                ):
                     urls.add(link)
-        except Exception:
-            pass
-    return list(urls)[:80]
+
+        except Exception as exc:
+            log.debug(
+                "WordPress discovery failed: %s",
+                exc
+            )
+
+    # Duplicate remove + limit
+    return list(urls)[:120]
 
 def parse_table(table):
     rows = table.find_all("tr")
